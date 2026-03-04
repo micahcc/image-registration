@@ -102,9 +102,6 @@ impl Gradient for Problem {
         let mut source_sq_sum = 0.0;
         let mut valid_pixel_count = 0;
 
-        // Storage for pixel positions that are valid (to avoid recomputation)
-        let mut valid_points = Vec::new();
-
         // First pass: collect statistics for the transformed source image
         for dest_y in 0..self.height {
             for dest_x in 0..self.width {
@@ -134,11 +131,6 @@ impl Gradient for Problem {
                     source_sum += source_val;
                     source_sq_sum += source_val * source_val;
                     valid_pixel_count += 1;
-
-                    // Store the valid position and values for reuse
-                    valid_points.push((
-                        dest_x, dest_y, dx, dy, source_x, source_y, src_x, src_y, source_val,
-                    ));
                 }
             }
         }
@@ -164,33 +156,54 @@ impl Gradient for Problem {
         let mut grad_shift_x = 0.0;
         let mut grad_shift_y = 0.0;
 
-        // Second pass: calculate gradients using valid points
-        for (dest_x, dest_y, dx, dy, source_x, source_y, src_x, src_y, source_val) in valid_points {
-            // Get destination value and center it
-            let dest_val = self.dest_smoothed.get_pixel(dest_x as u32, dest_y as u32)[0] as f64;
-            let dest_centered = dest_val - self.dest_mean;
+        // Second pass: calculate gradients in a single pass without storing points
+        for dest_y in 0..self.height {
+            for dest_x in 0..self.width {
+                // Calculate the corresponding position in the source image
+                let dx = dest_x as f64 - self.center_x;
+                let dy = dest_y as f64 - self.center_y;
 
-            // Calculate the correlation term for this pixel
-            let corr_term = dest_centered * normalizer;
+                // Apply inverse transformation (rotation + translation)
+                let source_x = self.center_x + cos_theta * dx + sin_theta * dy - shift_x;
+                let source_y = self.center_y - sin_theta * dx + cos_theta * dy - shift_y;
 
-            // Get the image gradient at this position
-            let dx_val = self.source_dv_dx.get_pixel(src_x as u32, src_y as u32)[0] as f64;
-            let dy_val = self.source_dv_dy.get_pixel(src_x as u32, src_y as u32)[0] as f64;
+                // Check if the pixel is within bounds
+                if source_x >= 0.0
+                    && source_x < self.width as f64
+                    && source_y >= 0.0
+                    && source_y < self.height as f64
+                {
+                    // Get integer coordinates for accessing pixels
+                    let src_x = source_x as usize;
+                    let src_y = source_y as usize;
 
-            // Partial derivatives of source_x and source_y with respect to parameters
-            // For theta:
-            // d(source_x)/d(theta) = -sin_theta * dx + cos_theta * dy
-            // d(source_y)/d(theta) = -cos_theta * dx - sin_theta * dy
-            let d_source_x_d_theta = -sin_theta * dx + cos_theta * dy;
-            let d_source_y_d_theta = -cos_theta * dx - sin_theta * dy;
+                    // Get destination value and center it
+                    let dest_val = self.dest_smoothed.get_pixel(dest_x as u32, dest_y as u32)[0] as f64;
+                    let dest_centered = dest_val - self.dest_mean;
 
-            // Calculate the change in source pixel value due to rotation
-            let d_source_val_d_theta = dx_val * d_source_x_d_theta + dy_val * d_source_y_d_theta;
+                    // Calculate the correlation term for this pixel
+                    let corr_term = dest_centered * normalizer;
 
-            // Update gradient components for each parameter
-            grad_theta += corr_term * d_source_val_d_theta;
-            grad_shift_x -= corr_term * dx_val; // d(source_x)/d(shift_x) = -1
-            grad_shift_y -= corr_term * dy_val; // d(source_y)/d(shift_y) = -1
+                    // Get the image gradient at this position
+                    let dx_val = self.source_dv_dx.get_pixel(src_x as u32, src_y as u32)[0] as f64;
+                    let dy_val = self.source_dv_dy.get_pixel(src_x as u32, src_y as u32)[0] as f64;
+
+                    // Partial derivatives of source_x and source_y with respect to parameters
+                    // For theta:
+                    // d(source_x)/d(theta) = -sin_theta * dx + cos_theta * dy
+                    // d(source_y)/d(theta) = -cos_theta * dx - sin_theta * dy
+                    let d_source_x_d_theta = -sin_theta * dx + cos_theta * dy;
+                    let d_source_y_d_theta = -cos_theta * dx - sin_theta * dy;
+
+                    // Calculate the change in source pixel value due to rotation
+                    let d_source_val_d_theta = dx_val * d_source_x_d_theta + dy_val * d_source_y_d_theta;
+
+                    // Update gradient components for each parameter
+                    grad_theta += corr_term * d_source_val_d_theta;
+                    grad_shift_x -= corr_term * dx_val; // d(source_x)/d(shift_x) = -1
+                    grad_shift_y -= corr_term * dy_val; // d(source_y)/d(shift_y) = -1
+                }
+            }
         }
 
         // Return the gradient of the cost function (2 - correlation)
