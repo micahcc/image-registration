@@ -103,6 +103,8 @@ impl Gradient for Problem {
         let mut valid_pixel_count = 0;
 
         // First pass: collect statistics for the transformed source image
+        // We need this pass to calculate the source image mean and variance
+        // These values are used to normalize the correlation coefficient
         for dest_y in 0..self.height {
             for dest_x in 0..self.width {
                 // Calculate the corresponding position in the source image
@@ -110,6 +112,8 @@ impl Gradient for Problem {
                 let dy = dest_y as f64 - self.center_y;
 
                 // Apply inverse transformation (rotation + translation)
+                // source_x = center_x + cos(θ)*(x-center_x) + sin(θ)*(y-center_y) - shift_x
+                // source_y = center_y - sin(θ)*(x-center_x) + cos(θ)*(y-center_y) - shift_y
                 let source_x = self.center_x + cos_theta * dx + sin_theta * dy - shift_x;
                 let source_y = self.center_y - sin_theta * dx + cos_theta * dy - shift_y;
 
@@ -148,6 +152,16 @@ impl Gradient for Problem {
         }
 
         // Normalizer for correlation coefficient
+        // The correlation coefficient is defined as:
+        // ρ = Σ[(S(x,y) - μₛ)(D(x,y) - μₚ)] / (N·σₛ·σₚ)
+        // where:
+        // - S(x,y) is the source image value at (x,y)
+        // - D(x,y) is the destination image value
+        // - μₛ is the source mean
+        // - μₚ is the destination mean
+        // - σₛ is the source standard deviation
+        // - σₚ is the destination standard deviation
+        // - N is the number of valid pixels
         let normalizer =
             1.0 / (valid_pixel_count as f64 * source_variance.sqrt() * self.dest_variance.sqrt());
 
@@ -157,6 +171,15 @@ impl Gradient for Problem {
         let mut grad_shift_y = 0.0;
 
         // Second pass: calculate gradients in a single pass without storing points
+        // The derivative of the correlation with respect to a parameter p is:
+        // ∂ρ/∂p = Σ[(∂S(x,y)/∂p)·(D(x,y) - μₚ)] / (N·σₛ·σₚ)
+        //
+        // Where ∂S(x,y)/∂p is the derivative of the source pixel value with respect to parameter p.
+        // This is calculated using the chain rule:
+        // ∂S(x,y)/∂p = (∂S/∂x)·(∂x/∂p) + (∂S/∂y)·(∂y/∂p)
+        //
+        // The derivatives ∂S/∂x and ∂S/∂y are the image gradients (precomputed)
+        // The derivatives ∂x/∂p and ∂y/∂p depend on the specific parameter (θ, shift_x, shift_y)
         for dest_y in 0..self.height {
             for dest_x in 0..self.width {
                 // Calculate the corresponding position in the source image
@@ -178,36 +201,50 @@ impl Gradient for Problem {
                     let src_y = source_y as usize;
 
                     // Get destination value and center it
-                    let dest_val = self.dest_smoothed.get_pixel(dest_x as u32, dest_y as u32)[0] as f64;
+                    let dest_val =
+                        self.dest_smoothed.get_pixel(dest_x as u32, dest_y as u32)[0] as f64;
                     let dest_centered = dest_val - self.dest_mean;
 
                     // Calculate the correlation term for this pixel
+                    // This is (D(x,y) - μₚ) / (N·σₛ·σₚ)
                     let corr_term = dest_centered * normalizer;
 
-                    // Get the image gradient at this position
+                    // Get the image gradient at this position (∂S/∂x and ∂S/∂y)
                     let dx_val = self.source_dv_dx.get_pixel(src_x as u32, src_y as u32)[0] as f64;
                     let dy_val = self.source_dv_dy.get_pixel(src_x as u32, src_y as u32)[0] as f64;
 
                     // Partial derivatives of source_x and source_y with respect to parameters
-                    // For theta:
-                    // d(source_x)/d(theta) = -sin_theta * dx + cos_theta * dy
-                    // d(source_y)/d(theta) = -cos_theta * dx - sin_theta * dy
+                    // These are derived by differentiating the transformation equations:
+                    //
+                    // For θ (rotation):
+                    // ∂(source_x)/∂θ = -sin(θ)·dx + cos(θ)·dy
+                    // ∂(source_y)/∂θ = -cos(θ)·dx - sin(θ)·dy
                     let d_source_x_d_theta = -sin_theta * dx + cos_theta * dy;
                     let d_source_y_d_theta = -cos_theta * dx - sin_theta * dy;
 
                     // Calculate the change in source pixel value due to rotation
-                    let d_source_val_d_theta = dx_val * d_source_x_d_theta + dy_val * d_source_y_d_theta;
+                    // ∂S/∂θ = (∂S/∂x)·(∂x/∂θ) + (∂S/∂y)·(∂y/∂θ)
+                    let d_source_val_d_theta =
+                        dx_val * d_source_x_d_theta + dy_val * d_source_y_d_theta;
 
                     // Update gradient components for each parameter
+                    // For θ: we calculated d_source_val_d_theta above
                     grad_theta += corr_term * d_source_val_d_theta;
-                    grad_shift_x -= corr_term * dx_val; // d(source_x)/d(shift_x) = -1
-                    grad_shift_y -= corr_term * dy_val; // d(source_y)/d(shift_y) = -1
+
+                    // For shift_x: ∂(source_x)/∂(shift_x) = -1, ∂(source_y)/∂(shift_x) = 0
+                    // So ∂S/∂(shift_x) = (∂S/∂x)·(-1) = -dx_val
+                    grad_shift_x -= corr_term * dx_val;
+
+                    // For shift_y: ∂(source_x)/∂(shift_y) = 0, ∂(source_y)/∂(shift_y) = -1
+                    // So ∂S/∂(shift_y) = (∂S/∂y)·(-1) = -dy_val
+                    grad_shift_y -= corr_term * dy_val;
                 }
             }
         }
 
         // Return the gradient of the cost function (2 - correlation)
-        // Since d(2 - correlation)/d(param) = -d(correlation)/d(param)
+        // Our optimization minimizes (2 - correlation)
+        // Since ∂(2-ρ)/∂p = -∂ρ/∂p, we negate the gradient components
         Ok(vec![-grad_theta, -grad_shift_x, -grad_shift_y])
     }
 }
@@ -234,7 +271,6 @@ impl CostFunction for Problem {
         // Initialize accumulators for correlation calculation
         let mut source_sum = 0.0;
         let mut source_sq_sum = 0.0;
-        let mut product_sum = 0.0;
         let mut valid_pixel_count = 0;
         let mut out_of_bounds_count = 0;
 
@@ -248,10 +284,6 @@ impl CostFunction for Problem {
                 // Apply inverse transformation (rotation + translation)
                 let source_x = self.center_x + cos_theta * dx + sin_theta * dy - shift_x;
                 let source_y = self.center_y - sin_theta * dx + cos_theta * dy - shift_y;
-
-                // Get the destination pixel value and center it with precalculated mean
-                let dest_val = self.dest_smoothed.get_pixel(dest_x as u32, dest_y as u32)[0] as f64;
-                let dest_centered = dest_val - self.dest_mean;
 
                 // Check if the pixel is within bounds
                 if source_x >= 0.0
@@ -270,7 +302,6 @@ impl CostFunction for Problem {
                     // Update the correlation accumulators
                     source_sum += source_val;
                     source_sq_sum += source_val * source_val;
-                    product_sum += source_val * dest_val;
                     valid_pixel_count += 1;
                 } else {
                     // Point is out of bounds, count it separately
