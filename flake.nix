@@ -26,6 +26,8 @@
         devShells.default = pkgs.mkShell {
           buildInputs = [
             rustToolchain
+            pkgs.rustfmt
+            pkgs.clippy
           ];
         };
       }

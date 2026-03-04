@@ -4,4 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-image = "0.25"
+image = "0"
+argmin = { version = "0" }
+argmin-math = { version = "0", features = ["vec"] }
+log = "0"
+env_logger = "0"
+anyhow = "1"
+imageproc = "0.26"
